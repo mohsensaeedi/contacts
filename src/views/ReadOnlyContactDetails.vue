@@ -4,55 +4,54 @@
 -->
 
 <template>
-	<div>
-		<!-- nothing selected or contact not found -->
-		<EmptyContent v-if="!contact"
-			class="empty-content"
-			:name="t('mail', 'No data for this contact')"
-			:description="t('mail', 'No user selected or the user has no data on their profile')">
-			<template #icon>
-				<IconContact :size="20" />
-			</template>
-		</EmptyContent>
-
-		<div class="recipient-details-content">
-			<div class="contact-title">
-				<h6>
-					{{ contact.fullName }}
-				</h6>
-				<template v-if="isReadOnly">
-					<!-- Subtitle here -->
-					<span v-html="formattedSubtitle" />
-				</template>
-			</div>
-			<div v-if="!loadingData" class="contact-details-wrapper">
-				<div v-for="(properties, name) in groupedProperties"
-					:key="name">
-					<ContactDetailsProperty v-for="(property, index) in properties"
-						:key="`${index}-${contact.key}-${property.name}`"
-						:is-first-property="index===0"
-						:is-last-property="index === properties.length - 1"
-						:property="property"
-						:contact="contact"
-						:local-contact="localContact"
-						:contacts="contacts"
-						:is-read-only="isReadOnly"
-						:bus="bus" />
-				</div>
+	<!-- nothing selected or contact not found -->
+	<NcEmptyContent v-if="!contact"
+		class="empty-content"
+		:name="t('mail', 'No data for this contact')"
+		:description="t('mail', 'No user selected or the user has no data on their profile')">
+		<template #icon>
+			<IconContact :size="20" />
+		</template>
+	</NcEmptyContent>
+	<div v-else
+		class="recipient-details-content">
+		<div class="contact-title">
+			<h6>
+				{{ contact.fullName }}
+			</h6>
+			<!-- Subtitle here -->
+			<span v-html="formattedSubtitle" />
+		</div>
+		<div class="contact-details-wrapper">
+			<div v-for="(properties, name) in groupedProperties"
+				:key="name">
+				<ContactDetailsProperty v-for="(property, index) in properties"
+					:key="`${index}-${contact.key}-${property.name}`"
+					:is-first-property="index === 0"
+					:is-last-property="index === properties.length - 1"
+					:property="property"
+					:contact="contact"
+					:local-contact="localContact"
+					:contacts="[contact]"
+					:is-read-only="true"
+					:bus="bus" />
 			</div>
 		</div>
 	</div>
 </template>
 
 <script>
-import { isMobile, NcEmptyContent as EmptyContent } from '@nextcloud/vue'
+import { isMobile, NcEmptyContent } from '@nextcloud/vue'
 import IconContact from 'vue-material-design-icons/AccountMultiple.vue'
 import mitt from 'mitt'
-import ContactDetailsProperty from './ContactDetails/ContactDetailsProperty.vue'
+import { namespaces as NS } from '@nextcloud/cdav-library'
 import { loadState } from '@nextcloud/initial-state'
-import Contact from '../store/contacts.js'
+import ContactDetailsProperty from '../components/ContactDetails/ContactDetailsProperty.vue'
+import Contact from '../models/contact.js'
 import rfcProps from '../models/rfcProps.js'
 import validate from '../services/validate.js'
+import client from '../services/cdav.js'
+import usePrincipalsStore from '../store/principals.js'
 
 const { profileEnabled } = loadState('user_status', 'profileEnabled', false)
 
@@ -61,58 +60,41 @@ export default {
 
 	components: {
 		ContactDetailsProperty,
-		EmptyContent,
+		NcEmptyContent,
 		IconContact,
-
 	},
 
 	mixins: [isMobile],
 
 	props: {
-		/* 		contactKey: {
-			type: String,
-			default: undefined,
-		}, */
+		contactEmailAddress: {
+			types: String,
+			required: true,
+		},
+		/*
 		reloadBus: {
 			type: Object,
 			required: true,
 		},
+		*/
+		// TODO: is desc used?
 		desc: {
 			type: String,
 			required: false,
 			default: '',
 		},
-		/* 		addressbooks: {
-			type: Object,
-			required: true,
-		}, */
-		contact: {
-			type: Contact,
-			required: true,
-		},
-		contacts: {
-			type: Array,
-			default: () => [],
-		},
-
 	},
 
 	data() {
 		return {
-			loadingData: false,
-			loadingUpdate: false,
-			// if true, the local contact have been fixed and requires a push
-			fixed: false,
 			contactDetailsSelector: '.contact-details',
 			excludeFromBirthdayKey: 'x-nc-exclude-from-birthday-calendar',
 
-			// communication for ContactDetailsAddNewProp and ContactDetailsProperty
 			bus: mitt(),
 			showMenuPopover: false,
 			profileEnabled,
+			contact: undefined,
 			localContact: undefined,
-			editMode: false,
-
 		}
 	},
 
@@ -139,10 +121,10 @@ export default {
 
 			return ''
 		},
-		/* 		// store getter
 		addressbooks() {
 			return this.$store.getters.getAddressbooks
 		},
+		/* 		// store getter
 		contact() {
 			return this.$store.getters.getContact(this.contactKey)
 		}, */
@@ -156,8 +138,7 @@ export default {
 				return []
 			}
 			return this.localContact.properties
-				.slice(0)
-				.sort((a, b) => {
+				.toSorted((a, b) => {
 					const nameA = a.name.split('.').pop()
 					const nameB = b.name.split('.').pop()
 					return rfcProps.fieldOrder.indexOf(nameA) - rfcProps.fieldOrder.indexOf(nameB)
@@ -192,10 +173,6 @@ export default {
 		addressbookIsReadOnly() {
 			return this.contact.addressbook?.readOnly
 		},
-		isReadOnly() {
-			return this.addressbookIsReadOnly || !this.editMode
-		},
-
 		/* /!**
 		 * Fake model to use the propertySelect component
 		 *
@@ -229,19 +206,10 @@ export default {
 		/**
 		 * Usable addressbook object linked to the local contact
 		 *
-		 * @param {string} [addressbookId] set the addressbook id
 		 * @return {string}
 		 */
-		addressbook: {
-			get() {
-				return this.contact.addressbook.id
-			},
-			set(addressbookId) {
-				// Only move when the address book actually changed to prevent a conflict.
-				if (this.contact.addressbook.id !== addressbookId) {
-					this.moveContactToAddressbook(addressbookId)
-				}
-			},
+		addressbook() {
+			return this.contact.addressbook.id
 		},
 
 		/**
@@ -264,43 +232,61 @@ export default {
 			immediate: true,
 		},
 	},
+	async beforeMount() {
+		// Init client and stores
+		await client.connect({ enableCardDAV: true })
+		const principalsStore = usePrincipalsStore()
+		principalsStore.setCurrentUserPrincipal(client)
+		await this.$store.dispatch('getAddressbooks')
+
+		// Fetch contact
+		await this.fetchContact()
+	},
 	methods: {
+		async fetchContact() {
+			const email = this.contactEmailAddress
+
+			console.log('abooks', this.addressbooks)
+			const result = await Promise.all(
+				this.addressbooks.map(async (addressBook) => [
+					addressBook.dav,
+					await addressBook.dav.addressbookQuery([{
+						name: [NS.IETF_CARDDAV, 'prop-filter'],
+						attributes: [['name', 'EMAIL']],
+						children: [{
+							name: [NS.IETF_CALDAV, 'text-match'],
+							value: email,
+						}],
+					}]),
+				])
+			)
+			const contacts = result.flatMap(([addressBook, vcards]) =>
+				vcards.map((vcard) => new Contact(vcard.data, addressBook)),
+			)
+
+			// TODO: find strategy to merge contacts?
+			this.contact = contacts.find(contact => contact.email === email)
+		},
 		updateGroups(value) {
 			this.newGroupsValue = value
 		},
 		/**
-		 * Send the local clone of contact to the store
-		 */
-		async updateContact() {
-			this.fixed = false
-			this.loadingUpdate = true
-			try {
-				await this.$store.dispatch('updateContact', this.localContact)
-			} finally {
-				this.loadingUpdate = false
-			}
-
-			// if we just created the contact, we need to force update the
-			// localContact to match the proper store contact
-			if (!this.localContact.dav) {
-				this.logger.debug('New contact synced!', { localContact: this.localContact })
-				// fetching newly created & storred contact
-				const contact = this.$store.getters.getContact(this.localContact.key)
-				await this.updateLocalContact(contact)
-			}
-		},
-		/**
-		 *  Update this.localContact and set this.fixed
+		 *  Update this.localContact
 		 *
 		 * @param {Contact} contact the contact to clone
 		 */
 		async updateLocalContact(contact) {
+			if (!contact) {
+				this.localContact = undefined
+				return
+			}
+
 			// create empty contact and copy inner data
 			const localContact = Object.assign(
 				Object.create(Object.getPrototypeOf(contact)),
 				contact,
 			)
-			this.fixed = validate(localContact)
+			validate(localContact)
 
 			this.localContact = localContact
 			this.newGroupsValue = [...this.localContact.groups]
